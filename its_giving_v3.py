@@ -9,6 +9,7 @@ Hand gestures plus a local Ukrainian voice trigger for the guitar video.
 Keys: q quit, d toggle HUD, 
       r rock, t thumbs_up, l log_carry, b bouquet, p point_camera (video).
       e rock_left. Rock horns: right hand -> rock, left hand -> rock_left.
+      h chest-beating video; two quick fist beats near the chest also trigger it.
       g guitar video, j Vlad video (say "що"), v toggle microphone. Say "у" to play the guitar clip.
       --voice-phrase "у моєму" narrows the trigger; --no-voice disables listening.
 """
@@ -21,6 +22,7 @@ import time
 import urllib.request
 import wave
 from functools import lru_cache
+from collections import deque
 
 import cv2
 import numpy as np
@@ -29,8 +31,8 @@ from mediapipe.tasks import python as mp_tasks
 from mediapipe.tasks.python import vision
 from voice_trigger import VoiceTrigger
 
-POSES = ["rock", "rock_left", "thumbs_up", "log_carry", "bouquet", "point_camera", "guitar_voice", "vlad_voice", "sigma", "cinema"]
-TEST_KEYS = {"r": "rock", "e": "rock_left", "t": "thumbs_up", "l": "log_carry", "b": "bouquet", "p": "point_camera", "g": "guitar_voice", "j": "vlad_voice", "s": "sigma", "c": "cinema"}
+POSES = ["rock", "rock_left", "thumbs_up", "log_carry", "bouquet", "point_camera", "guitar_voice", "vlad_voice", "sigma", "cinema", "chest_beat"]
+TEST_KEYS = {"r": "rock", "e": "rock_left", "t": "thumbs_up", "l": "log_carry", "b": "bouquet", "p": "point_camera", "g": "guitar_voice", "j": "vlad_voice", "s": "sigma", "c": "cinema", "h": "chest_beat"}
 
 FACE_SCALE = 2.0
 ASSET_SCALES = {"log_carry": 1.2, "bouquet": 1.3}
@@ -258,7 +260,7 @@ class ReactionAudio:
 class VideoAsset:
     """Time-based looping video with audio and only the current frame in memory."""
 
-    def __init__(self, path, mirrored=False):
+    def __init__(self, path, mirrored=False, green_screen=False):
         self.cap = cv2.VideoCapture(path)
         self.fps = self.cap.get(cv2.CAP_PROP_FPS)
         count = self.cap.get(cv2.CAP_PROP_FRAME_COUNT)
@@ -271,6 +273,7 @@ class VideoAsset:
         self.audio = ReactionAudio(path, self.total)
         self.aspect = frame.shape[1] / frame.shape[0]
         self.mirrored = mirrored
+        self.green_screen = green_screen
         self._frame, self._index = frame, 0
         self._scaled_key, self._scaled = None, None
         self._warned = False
@@ -301,6 +304,8 @@ class VideoAsset:
             if self.mirrored:
                 frame = cv2.flip(frame, 1)
             self._scaled = to_bgra(frame)
+            if self.green_screen:
+                self._scaled = key_green(self._scaled)
             self._scaled_key = key
         return self._scaled
 
@@ -367,6 +372,17 @@ def bouquet_fire_sprite(effect, elapsed_ms, photo_box):
     return sprite, int(x + (w - sw) / 2), int(y + (h - sh) / 2)
 
 
+def key_green(sprite):
+    """Remove saturated green while retaining neutral colors and soft edges."""
+    result = sprite.copy()
+    blue, green, red = cv2.split(sprite[:, :, :3].astype(np.float32))
+    neutral = np.maximum(red, blue)
+    matte = np.clip((green - neutral - 25) / 60, 0, 1)
+    result[:, :, 3] = (sprite[:, :, 3] * (1 - matte)).astype(np.uint8)
+    result[:, :, 1] = (green - matte * np.maximum(green - neutral, 0)).astype(np.uint8)
+    return result
+
+
 def to_bgra(img):
     if img.ndim == 2:
         return cv2.cvtColor(img, cv2.COLOR_GRAY2BGRA)
@@ -401,7 +417,8 @@ def load_asset(pose):
         return placeholder(pose)
     if path.lower().endswith((".mp4", ".mov")):
         try:
-            asset = VideoAsset(path, mirrored=pose in ASSET_MIRRORED)
+            asset = VideoAsset(path, mirrored=pose in ASSET_MIRRORED,
+                               green_screen=pose == 'chest_beat')
         except ValueError as e:
             print(f"  {pose:16s} {e} -> placeholder")
             return placeholder(pose)
@@ -562,6 +579,7 @@ class Hand:
         # Tucked thumb distinguishes holding a bouquet from giving a thumbs-up.
         self.fist = bool(folded and not self.thumbs_up
                          and dist(p[4], p[5]) < 0.75 * palm_size)
+        self.chest_fist = bool(folded and not self.thumbs_up)
         # MediaPipe depth uses the same scale as normalized x; negative is closer.
         xyz = np.array([[l.x * W, l.y * H, getattr(l, "z", 0.0) * W] for l in lms], np.float32)
 
@@ -588,6 +606,77 @@ class Hand:
                     for extended, angle in zip(ext[1:], self.finger_angles[2:]))
         )
         self.point_camera = pointing_at_lens or relaxed_point
+
+
+class ChestBeatDetector:
+    """Two quick fist beats below the face; a resting bouquet fist stays idle.
+
+    Track each hand independently in face-relative coordinates. Apparent palm
+    size also captures movement towards the chest along the camera's depth axis.
+    This is a motion heuristic, not a measurement of physical contact.
+    """
+
+    def __init__(self):
+        self.tracks = []
+        self.cooldown_until = 0.0
+
+    def reset(self):
+        self.tracks.clear()
+
+    @staticmethod
+    def repeated_strokes(history):
+        for axis in range(3):
+            anchor = extreme = history[0][1][axis]
+            direction, strokes = 0, 0
+            for _, point in history:
+                value = point[axis]
+                if not direction:
+                    if abs(value - anchor) >= 0.16:
+                        direction = 1 if value > anchor else -1
+                        extreme, strokes = value, 1
+                elif (value - extreme) * direction > 0:
+                    extreme = value
+                elif (extreme - value) * direction >= 0.16:
+                    direction *= -1
+                    extreme, strokes = value, strokes + 1
+                if strokes >= 3:
+                    return True
+        return False
+
+    def update(self, face, hands, now):
+        if face is None or now < self.cooldown_until:
+            self.reset()
+            return False
+        old = [t for t in self.tracks if now - t['history'][-1][0] <= 0.2]
+        current = []
+        for hand in hands:
+            if not hand.chest_fist:
+                continue
+            xy = (hand.palm - np.asarray(face.center)) / [max(face.w, 1), max(face.h, 1)]
+            if not (abs(xy[0]) < 1.15 and 0.65 < xy[1] < 2.4):
+                continue
+            size = max(dist(hand.points[0], hand.points[9]),
+                       dist(hand.points[5], hand.points[17]), 1) / max(face.w, 1)
+            point = np.array([*xy, np.log(size)])
+            candidates = [t for t in old if
+                          (hand.side == 'Unknown' or t['side'] == 'Unknown' or hand.side == t['side'])
+                          and np.linalg.norm(point - t['history'][-1][1]) < 0.65]
+            track = min(candidates, key=lambda t: np.linalg.norm(point - t['history'][-1][1])) if candidates else None
+            if track is None:
+                track = {'side': hand.side, 'history': deque()}
+            else:
+                old = [t for t in old if t is not track]
+            history = track['history']
+            history.append((now, point))
+            while now - history[0][0] > 1.2:
+                history.popleft()
+            current.append(track)
+            if self.repeated_strokes(history):
+                self.cooldown_until = now + 1.5
+                self.reset()
+                return True
+        self.tracks = current
+        return False
 
 
 def decide(face, hands):
@@ -782,7 +871,7 @@ def main():
     print(f"Camera {args.camera}: {W}x{H}")
 
     clock = Clock()
-    window = "it's giving v3 (q quit, d HUD, v mic, r / e / t / l / b / p / g / j / s / c test)"
+    window = "it's giving v3 (q quit, d HUD, v mic, r / e / t / l / b / p / g / j / s / c / h test)"
 
     print("Assets:")
     assets = {pose: load_asset(pose) for pose in POSES}
@@ -806,12 +895,13 @@ def main():
             print(f"Virtual camera unavailable ({e}). Preview-only.")
 
     face_det, hand_det = build_detectors(model_paths)
+    chest_beat = ChestBeatDetector()
     shown, hold, show_hud = None, 0, True
     arm = {p: 0 for p in POSES}
     shown_since = 0.0
     forced, forced_until = None, 0.0
     sm_center, sm_h = np.array([W / 2, H / 2], np.float32), H * 0.45
-    print("Running. Focus the preview window: q quit, d HUD, v mic,  r right rock, e left rock, t thumbs_up, l log_carry, b bouquet, p video, g guitar, j vlad, s sigma, c cinema")
+    print("Running. Focus the preview window: q quit, d HUD, v mic,  r right rock, e left rock, t thumbs_up, l log_carry, b bouquet, p video, g guitar, j vlad, s sigma, c cinema, h chest beat")
 
     last_frame_time, fps = time.monotonic(), 0.0
     try:
@@ -852,6 +942,14 @@ def main():
                 if shown == forced and isinstance(assets[forced], VideoAsset):
                     shown, hold = None, 0
                 forced = None
+            if forced:
+                chest_beat.reset()
+            elif chest_beat.update(face, hands, now) and isinstance(assets.get('chest_beat'), VideoAsset):
+                forced = 'chest_beat'
+                forced_until = now + assets[forced].total / 1000
+                assets[forced].audio.stop()
+                shown, hold = None, 0
+                raw = 'chest_beat'
             spoken = voice.poll()
             voice_pose = "vlad_voice" if spoken == "що" else "guitar_voice"
             if spoken is not None and isinstance(assets.get(voice_pose), VideoAsset):
@@ -903,13 +1001,15 @@ def main():
                     # Fill the output frame, preserving aspect ratio and cropping
                     # excess edges, independent of the tracked face position.
                     h = int(np.ceil(max(H, W / asset.aspect)))
+                elif shown == "chest_beat":
+                    h = int(min(H * 0.98, W * 0.98 / asset.aspect))
                 sprite = asset.scaled(idx, max(h, 8))
                 sh, sw = sprite.shape[:2]
                 y_offset = ASSET_Y_OFFSETS.get(shown, 0.0) * sh
                 x_offset = ASSET_X_OFFSETS.get(shown, 0.0) * sw
                 x = int(sm_center[0] - sw / 2 + x_offset)
                 y = int(sm_center[1] - sh / 2 - 0.05 * sh + y_offset)
-                if shown == "vlad_voice":
+                if shown in ("vlad_voice", "chest_beat"):
                     x, y = (W - sw) // 2, (H - sh) // 2
                 if shown == "rock":
                     y = int(np.clip(y, rock_top, H - sh - 4))
