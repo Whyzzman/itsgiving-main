@@ -257,5 +257,8 @@ Want to change **how easily it goes off**? `Z`, `FLOOR` and `ARM`.
 
 
 
-python its_giving_v3.py --calibrate --camera 1
+### Запуск V3
+
+```bash
 python its_giving_v3.py --camera 1
+```

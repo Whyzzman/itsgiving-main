@@ -81,6 +81,13 @@ class VoiceTrigger:
     def _listening(self):
         return self.enabled and not self.suppressed and time.monotonic() >= self.resume_at
 
+    @property
+    def speech_pending(self):
+        """Give recognition time to finish before a lip gesture starts playback."""
+        return (self.state == "LISTENING" and self._listening()
+                and self.last_voice_at > 0
+                and time.monotonic() - self.last_voice_at < 1.2)
+
     def _invalidate(self):
         self.generation += 1
         for q in (self.audio, self.events):

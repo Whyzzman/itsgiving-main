@@ -44,7 +44,8 @@ ASSET_X_OFFSETS = {"log_carry": 0.09}
 # Additional downward shift as a fraction of the displayed image height.
 ASSET_Y_OFFSETS = {"thumbs_up": 0.15, "bouquet": 0.35}
 HOLD_FRAMES = 10
-ARM = {"rock": 5, "rock_left": 5, "thumbs_up": 5, "log_carry": 6, "bouquet": 7, "point_camera": 2, "sigma": 4, "cinema": 4}
+# SigmaGate already checks duration; do not add another frame delay for sigma.
+ARM = {"rock": 5, "rock_left": 5, "thumbs_up": 5, "log_carry": 6, "bouquet": 7, "point_camera": 2, "sigma": 1, "cinema": 4}
 
 MODELS = {
     "face_landmarker.task": "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task",
@@ -519,6 +520,21 @@ def sigma_expression(scores):
                 and scores.get("jawOpen", 0) < 0.25 and blink < 0.7)
 
 
+class SigmaGate:
+    """Require a held expression in silence, not briefly rounded speech lips."""
+
+    def __init__(self):
+        self.since = None
+
+    def update(self, candidate, speech_pending, now):
+        if not candidate or speech_pending:
+            self.since = None
+            return False
+        if self.since is None:
+            self.since = now
+        return now - self.since >= 0.15
+
+
 class Face:
     def __init__(self, lms, W, H, blendshapes=()):
         p = np.array([[l.x * W, l.y * H] for l in lms], np.float32)
@@ -896,6 +912,7 @@ def main():
 
     face_det, hand_det = build_detectors(model_paths)
     chest_beat = ChestBeatDetector()
+    sigma_gate = SigmaGate()
     shown, hold, show_hud = None, 0, True
     arm = {p: 0 for p in POSES}
     shown_since = 0.0
@@ -927,6 +944,9 @@ def main():
                           mirrored=not args.no_flip) for i, h in enumerate(hr.hand_landmarks)]
             raw, dbg = decide(face, hands)
             frame_time = time.monotonic()
+            sigma_ready = sigma_gate.update(raw == "sigma", voice.speech_pending, frame_time)
+            if raw == "sigma" and not sigma_ready:
+                raw = None
             instant_fps = 1.0 / max(frame_time - last_frame_time, 1e-6)
             fps = instant_fps if fps == 0 else 0.9 * fps + 0.1 * instant_fps
             last_frame_time = frame_time

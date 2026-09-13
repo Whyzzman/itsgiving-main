@@ -4,6 +4,30 @@ import its_giving_v3 as app
 import numpy as np
 
 class SigmaTests(unittest.TestCase):
+    def test_speech_waits_for_recognition_then_requires_held_pose(self):
+        gate = app.SigmaGate()
+        self.assertFalse(gate.update(True, False, 10))
+        self.assertFalse(gate.update(True, True, 10.2))
+        self.assertFalse(gate.update(True, True, 11))
+        self.assertFalse(gate.update(True, False, 12))
+        self.assertTrue(gate.update(True, False, 12.7))
+
+    def test_brief_or_interrupted_expression_does_not_fire(self):
+        gate = app.SigmaGate()
+        self.assertFalse(gate.update(True, False, 10))
+        self.assertFalse(gate.update(True, False, 10.1))
+        self.assertFalse(gate.update(False, False, 10.12))
+        self.assertFalse(gate.update(True, False, 11))
+        self.assertTrue(gate.update(True, False, 11.7))
+
+    def test_sigma_fires_after_short_hold_without_extra_frame_delay(self):
+        gate = app.SigmaGate()
+        self.assertFalse(gate.update(True, False, 10))
+        self.assertFalse(gate.update(True, False, 10.1))
+        self.assertTrue(gate.update(True, False, 10.16))
+        self.assertEqual(app.ARM['sigma'], 1)
+        self.assertFalse(gate.update(True, True, 10.2))
+
     def test_overlay_follows_face_and_hides_without_tracking(self):
         points = np.zeros((478, 2), np.float32)
         angles = np.linspace(0, 2 * np.pi, len(app.FACE_OVAL), endpoint=False)

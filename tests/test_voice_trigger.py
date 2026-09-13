@@ -81,6 +81,29 @@ class VoiceQueueTests(unittest.TestCase):
         self.voice.events.put((self.voice.generation, time.monotonic() - 2, "у"))
         self.assertIsNone(self.voice.poll())
 
+    def test_recent_audio_reserves_time_for_voice_trigger(self):
+        self.voice.state = "LISTENING"
+        signal = np.full(100, 3276, dtype=np.int16).tobytes()
+        with patch("voice_trigger.time.monotonic", return_value=10):
+            self.voice._callback(signal, 100, None, None)
+        with patch("voice_trigger.time.monotonic", return_value=11):
+            self.assertTrue(self.voice.speech_pending)
+            self.voice.events.put((self.voice.generation, 11, "у"))
+            self.assertEqual(self.voice.poll(), "у")
+        with patch("voice_trigger.time.monotonic", return_value=11.3):
+            self.assertFalse(self.voice.speech_pending)
+
+    def test_inactive_microphone_does_not_block_sigma(self):
+        self.voice.last_voice_at = 10
+        with patch("voice_trigger.time.monotonic", return_value=10.1):
+            for state, enabled, suppressed in (("MIC ERROR", True, False),
+                                                ("LISTENING", False, False),
+                                                ("LISTENING", True, True)):
+                self.voice.state = state
+                self.voice.enabled = enabled
+                self.voice.suppressed = suppressed
+                self.assertFalse(self.voice.speech_pending)
+
     def test_switch_off_and_close_drop_events(self):
         self.voice.events.put((self.voice.generation, time.monotonic(), "у"))
         self.voice.toggle()

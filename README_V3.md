@@ -6,6 +6,9 @@
 venv/bin/python its_giving_v3.py --no-vcam
 ```
 
+Для камери з індексом 1: `venv/bin/python its_giving_v3.py --camera 1`.
+У V3 немає параметра `--calibrate` — він стосувався V2.
+
 Скажи **«у»** (або фразу з цим окремим словом, наприклад «у моєму»).
 Відео `assets/guitar_voice.mov` програється зі звуком один раз до кінця.
 Скажи **«що»**, щоб запустити `assets/vlad_voice.mp4` зі звуком один раз до кінця.
