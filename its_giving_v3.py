@@ -144,6 +144,64 @@ class Asset:
         pass
 
 
+FACE_OVAL = [10, 338, 297, 332, 284, 251, 389, 356, 454, 323, 361, 288,
+             397, 365, 379, 378, 400, 377, 152, 148, 176, 149, 150, 136,
+             172, 58, 132, 93, 234, 127, 162, 21, 54, 103, 67, 109]
+FACE_ANCHORS = [33, 263, 152]  # Outer eye corners and chin.
+
+
+def face_alpha(points, shape):
+    mask = np.zeros(shape[:2], np.uint8)
+    cv2.fillPoly(mask, [np.rint(points[FACE_OVAL]).astype(np.int32)], 255)
+    # Feather inward so the background outside the facial contour stays hidden.
+    distance = cv2.distanceTransform(mask, cv2.DIST_L2, 3)
+    feather = max(1.0, np.ptp(points[FACE_OVAL, 1]) * 0.025)
+    return np.clip(distance / feather, 0, 1)
+
+
+class FaceOverlay:
+    """Keep GIF timing, masking and aligning each frame to the live face."""
+
+    def __init__(self, asset):
+        self.frames, self.anchors = [], []
+        options = vision.FaceLandmarkerOptions(
+            base_options=mp_tasks.BaseOptions(
+                model_asset_path=os.path.join(HERE, "models", "face_landmarker.task")),
+            running_mode=vision.RunningMode.IMAGE, num_faces=1)
+        with vision.FaceLandmarker.create_from_options(options) as detector:
+            for frame in asset.frames:
+                rgb = cv2.cvtColor(frame, cv2.COLOR_BGRA2RGB)
+                result = detector.detect(mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb))
+                if not result.face_landmarks:
+                    self.frames.append(None)
+                    self.anchors.append(None)
+                    continue
+                h, w = frame.shape[:2]
+                points = np.array([[lm.x * w, lm.y * h]
+                                   for lm in result.face_landmarks[0]], np.float32)
+                cutout = frame.copy()
+                cutout[:, :, 3] = (frame[:, :, 3] * face_alpha(points, frame.shape)).astype(np.uint8)
+                self.frames.append(cutout)
+                self.anchors.append(points[FACE_ANCHORS])
+        valid = [i for i, frame in enumerate(self.frames) if frame is not None]
+        if not valid:
+            raise ValueError("No face detected in sigma asset")
+        for i, frame in enumerate(self.frames):
+            if frame is None:
+                nearest = min(valid, key=lambda j: abs(j - i))
+                self.frames[i] = self.frames[nearest]
+                self.anchors[i] = self.anchors[nearest]
+
+    def render(self, idx, face, shape):
+        h, w = shape[:2]
+        if face is None:
+            return np.zeros((h, w, 4), np.uint8)
+        transform = cv2.getAffineTransform(self.anchors[idx], face.points[FACE_ANCHORS])
+        sprite = cv2.warpAffine(self.frames[idx], transform, (w, h), flags=cv2.INTER_LINEAR)
+        sprite[:, :, 3] = (sprite[:, :, 3] * face_alpha(face.points, shape)).astype(np.uint8)
+        return sprite
+
+
 class ReactionAudio:
     """Play a reaction's WAV through macOS audio, once per loop."""
 
@@ -447,6 +505,7 @@ def sigma_expression(scores):
 class Face:
     def __init__(self, lms, W, H, blendshapes=()):
         p = np.array([[l.x * W, l.y * H] for l in lms], np.float32)
+        self.points = p
         x0, y0 = p.min(0)
         x1, y1 = p.max(0)
         self.box = (int(x0), int(y0), int(x1), int(y1))
@@ -552,7 +611,6 @@ def decide(face, hands):
     if face is None:
         return None, d
 
-    near = lambda a, b, k: dist(a, b) < k * face.w
     if len(hands) == 1 and hands[0].fist:
         x, y = (hands[0].palm - np.asarray(face.center)) / [max(face.w, 1.0), max(face.h, 1.0)]
         # One closed hand in front of the chest, below the chin.
@@ -560,15 +618,20 @@ def decide(face, hands):
             return "bouquet", d
     if len(hands) >= 2:
         a, b = hands[0], hands[1]
-        # Both palms beside the same shoulder: one near the cheek, one lower.
-        # Face-relative coordinates support either side and different distances.
+        # Carry pose: inner palm beside the neck, outer palm farther along
+        # the same shoulder, level with or slightly below the inner palm.
+        # Normalize to the face so mirroring and camera distance do not matter.
         rel = [(h.palm - np.asarray(face.center)) / [max(face.w, 1.0), max(face.h, 1.0)]
                for h in (a, b)]
         same_side = rel[0][0] * rel[1][0] > 0
-        beside_head = all(0.45 < abs(x) < 2.0 and -0.45 < y < 1.0 for x, y in rel)
-        upper_y, lower_y = sorted(y for _, y in rel)
-        if same_side and beside_head and upper_y < 0.35 and lower_y > 0.15 \
-                and lower_y - upper_y > 0.2 and near(a.palm, b.palm, 1.5):
+        inner, outer = sorted(rel, key=lambda p: abs(p[0]))
+        inner_x, inner_y = abs(inner[0]), inner[1]
+        outer_x, outer_y = abs(outer[0]), outer[1]
+        if (same_side
+                and 0.2 < inner_x < 0.95 and 0.2 < inner_y < 0.95
+                and 0.95 < outer_x < 2.4 and 0.25 < outer_y < 1.25
+                and 0.55 < outer_x - inner_x < 1.9
+                and -0.15 < outer_y - inner_y < 0.65):
             return "log_carry", d
     if face.sigma:
         return "sigma", d
@@ -723,6 +786,7 @@ def main():
 
     print("Assets:")
     assets = {pose: load_asset(pose) for pose in POSES}
+    sigma_overlay = FaceOverlay(assets["sigma"])
     bouquet_fire = VideoAsset(os.path.join(HERE, "assets", "bouquet_fire.mp4"))
     sounds = {pose: asset.audio for pose, asset in assets.items() if isinstance(asset, VideoAsset)}
     sounds["rock"] = ReactionAudio(os.path.join(HERE, "assets", "rock.wav"))
@@ -861,6 +925,9 @@ def main():
                         overlay(frame, flames, fx, fy)
                         if show_hud:
                             overlay(preview, flames, fx, fy)
+                if shown == "sigma":
+                    sprite = sigma_overlay.render(idx, face, frame.shape)
+                    x, y = 0, 0
                 overlay(frame, sprite, x, y)
                 if show_hud:
                     overlay(preview, sprite, x, y)
