@@ -86,11 +86,11 @@ class VoiceQueueTests(unittest.TestCase):
         signal = np.full(100, 3276, dtype=np.int16).tobytes()
         with patch("voice_trigger.time.monotonic", return_value=10):
             self.voice._callback(signal, 100, None, None)
-        with patch("voice_trigger.time.monotonic", return_value=11):
+        with patch("voice_trigger.time.monotonic", return_value=10.3):
             self.assertTrue(self.voice.speech_pending)
-            self.voice.events.put((self.voice.generation, 11, "у"))
+            self.voice.events.put((self.voice.generation, 10.3, "у"))
             self.assertEqual(self.voice.poll(), "у")
-        with patch("voice_trigger.time.monotonic", return_value=11.3):
+        with patch("voice_trigger.time.monotonic", return_value=10.351):
             self.assertFalse(self.voice.speech_pending)
 
     def test_inactive_microphone_does_not_block_sigma(self):

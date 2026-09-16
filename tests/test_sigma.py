@@ -15,16 +15,17 @@ class SigmaTests(unittest.TestCase):
     def test_brief_or_interrupted_expression_does_not_fire(self):
         gate = app.SigmaGate()
         self.assertFalse(gate.update(True, False, 10))
-        self.assertFalse(gate.update(True, False, 10.1))
-        self.assertFalse(gate.update(False, False, 10.12))
+        self.assertFalse(gate.update(True, False, 10.03))
+        self.assertFalse(gate.update(False, False, 10.04))
         self.assertFalse(gate.update(True, False, 11))
-        self.assertTrue(gate.update(True, False, 11.7))
+        self.assertFalse(gate.update(True, False, 11.03))
+        self.assertTrue(gate.update(True, False, 11.07))
 
     def test_sigma_fires_after_short_hold_without_extra_frame_delay(self):
         gate = app.SigmaGate()
         self.assertFalse(gate.update(True, False, 10))
-        self.assertFalse(gate.update(True, False, 10.1))
-        self.assertTrue(gate.update(True, False, 10.16))
+        self.assertFalse(gate.update(True, False, 10.03))
+        self.assertTrue(gate.update(True, False, 10.061))
         self.assertEqual(app.ARM['sigma'], 1)
         self.assertFalse(gate.update(True, True, 10.2))
 

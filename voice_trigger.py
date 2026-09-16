@@ -83,10 +83,10 @@ class VoiceTrigger:
 
     @property
     def speech_pending(self):
-        """Give recognition time to finish before a lip gesture starts playback."""
+        """Briefly guard lip gestures after sound without a long sigma delay."""
         return (self.state == "LISTENING" and self._listening()
                 and self.last_voice_at > 0
-                and time.monotonic() - self.last_voice_at < 1.2)
+                and time.monotonic() - self.last_voice_at < 0.35)
 
     def _invalidate(self):
         self.generation += 1

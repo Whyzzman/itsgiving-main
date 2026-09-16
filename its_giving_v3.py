@@ -532,7 +532,7 @@ class SigmaGate:
             return False
         if self.since is None:
             self.since = now
-        return now - self.since >= 0.15
+        return now - self.since >= 0.06
 
 
 class Face:
