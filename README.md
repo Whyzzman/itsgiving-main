@@ -7,7 +7,7 @@ source venv/bin/activate           # Windows: venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
-### Запуск V3
+### Start V3
 
 ```bash
 python its_giving_v3.py --camera 1
